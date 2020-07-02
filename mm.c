@@ -292,7 +292,7 @@ void free(void *bp)
     write_footer(block, size, false);
 
     // Try to coalesce the block with its neighbors
-    block = coalesce_block(block);
+    // block = coalesce_block(block);
 
     dbg_ensures(mm_checkheap(__LINE__));
 }
@@ -413,7 +413,7 @@ static block_t *extend_heap(size_t size)
     write_header(block_next, 0, true);
 
     // Coalesce in case the previous block was free
-    block = coalesce_block(block);
+    // block = coalesce_block(block);
 
     return block;
 }
@@ -536,23 +536,79 @@ static block_t *find_fit(size_t asize)
  * <Are there any preconditions or postconditions?>
  */
 bool mm_checkheap(int line)
-{
-    /*
-     * TODO: Delete this comment!
-     *
-     * You will need to write the heap checker yourself.
-     * Please keep modularity in mind when you're writing the heap checker!
-     *
-     * As a filler: one guacamole is equal to 6.02214086 x 10**23 guacas.
-     * One might even call it...  the avocado's number.
-     *
-     * Internal use only: If you mix guacamole on your bibimbap,
-     * do you eat it with a pair of chopsticks, or with a spoon?
-     */
+{   
+    // Check prologue is allocated with size 0
+    word_t *prologue = find_prev_footer(heap_start);
+    if (!extract_alloc(*prologue) || extract_size(*prologue)) 
+    {
+        dbg_printf("Prologue is not properly created\n");
+        return false;
+    }
+
+    block_t *block;
+    bool prev_free = !get_alloc(heap_start);
+    for (block = heap_start; get_size(block) > 0;
+                            block = find_next(block))
+    {
+        // Check header and footer match
+        bool same_size = (extract_size(block->header) 
+            == extract_size(*(header_to_footer(block))));
+
+        bool same_alloc_status = (extract_alloc(block->header) 
+            == extract_alloc(*(header_to_footer(block))));
+        
+        if (!same_size || !same_alloc_status)
+        {
+            dbg_printf("Header and footer do not match\n");
+            dbg_printf("Header size %zu, alloc %d\n",
+                    extract_size(block->header), 
+                    extract_alloc(block->header));
+            dbg_printf("Footer size %zu, alloc %d\n", 
+                    extract_size(*(header_to_footer(block))), 
+                    extract_alloc(*(header_to_footer(block))));
+            return false;
+        }
+
+        // Check payload alignment
+        unsigned long payload_addr = (unsigned long) &(block->payload);
+        if(( payload_addr & 0xFUL) != 0) 
+        {
+            dbg_printf("Payload not aligned \n");
+            dbg_printf("Payload addr %p\n", (void *)&(block->payload));
+            return false;
+        }
+
+        // Check block size
+        if ((get_size(block)) % 16 != 0)
+        {
+            dbg_printf("Block is not multiple of 16\n");
+            dbg_printf("Block size %zu\n", get_size(block));
+            return false;
+        }
+
+        // Check coalescing
+        if ((prev_free || get_alloc(block)) == 0) 
+        {
+            dbg_printf("Two consecutive free blocks\n");
+            return false;
+        }
+
+        prev_free = get_alloc(block);
+
+    }
+
+    // Check epilogue is allocated with size 0
+    if (!extract_alloc(block->header) || extract_size(block->header))
+    {
+        dbg_printf("Epilogue is not properly created\n");
+        return false;
+    }
+
 
     return true;
 
 }
+
 
 
 /*
