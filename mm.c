@@ -116,7 +116,19 @@ typedef struct block
      * should use a union to alias this zero-length array with another struct,
      * in order to store additional types of data in the payload memory.
      */
+    union data_t{
+
+    struct link_t
+    {
+        struct block* prev;
+        struct block* next;
+    } link;
+    
+   
+  
     char payload[0];
+
+    } data;
 
     /*
      * TODO: delete or replace this comment once you've thought about it.
@@ -131,7 +143,7 @@ typedef struct block
 
 // Pointer to first block
 static block_t *heap_start = NULL;
-
+static block_t *free_list = NULL;
 
 /* Function prototypes for internal helper routines */
 
@@ -141,6 +153,11 @@ static block_t *extend_heap(size_t size);
 static block_t *find_fit(size_t asize);
 static block_t *coalesce_block(block_t *block);
 static void split_block(block_t *block, size_t asize);
+
+static void remove_block_link(block_t *block);
+static void reassign_blocks_link(block_t *free, block_t *alloc);
+static void insert_free_block(block_t *block, bool is_adjacent);
+
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
@@ -155,6 +172,7 @@ static bool get_alloc(block_t *block);
 
 static void write_header(block_t *block, size_t size, bool alloc);
 static void write_footer(block_t *block, size_t size, bool alloc);
+static void write_link(block_t *block, block_t *prev, block_t *next);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -163,6 +181,10 @@ static word_t *header_to_footer(block_t *block);
 static block_t *find_next(block_t *block);
 static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
+
+static void print_free_list();
+static void print_heap();
+
 
 
 /*
@@ -192,6 +214,9 @@ bool mm_init(void)
 
     // Heap starts with first "block header", currently the epilogue
     heap_start = (block_t *) &(start[1]);
+    free_list = NULL;
+    // free_list = (block_t *) &(start[0]);
+    // free_list->data.link.next = NULL;
 
     // Extend the empty heap with a free block of chunksize bytes
     if (extend_heap(chunksize) == NULL)
@@ -237,7 +262,8 @@ void *malloc(size_t size)
 
     // If no fit is found, request more memory, and then and place the block
     if (block == NULL)
-    {
+    {   
+        // dbg_printf("calling extend_heap in malloc\n");
         // Always request at least chunksize
         extendsize = max(asize, chunksize);
         block = extend_heap(extendsize);
@@ -259,8 +285,9 @@ void *malloc(size_t size)
     // Try to split the block if too large
     split_block(block, asize);
 
+    // dbg_printf("split in malloc complete\n");
     bp = header_to_payload(block);
-
+    // dbg_printf("done get payload\n");
     dbg_ensures(mm_checkheap(__LINE__));
     return bp;
 }
@@ -286,15 +313,57 @@ void free(void *bp)
 
     // The block should be marked as allocated
     dbg_assert(get_alloc(block));
+    if (!get_alloc(block))
+    {
+        return;
+    }
 
     // Mark the block as free
     write_header(block, size, false);
     write_footer(block, size, false);
 
+    // reset free link here?
     // Try to coalesce the block with its neighbors
-    // block = coalesce_block(block);
+    block = coalesce_block(block);
+    print_free_list();
+    print_heap();
 
     dbg_ensures(mm_checkheap(__LINE__));
+}
+
+static void print_free_list()
+{
+    block_t *block;
+    int count = 1;
+    for (block = free_list; block != NULL; block = block->data.link.next)
+    {
+        dbg_printf("free block #%d %p prev %p/ next %p size %zu\n",
+        count, (void *)block, (void *)block->data.link.prev, (void *)block->data.link.next, get_size(block));
+        count ++;
+    }
+}
+
+static void print_heap()
+{
+    block_t *block;
+    int count = 1;
+    for (block = heap_start; get_size(block) > 0;
+                            block = find_next(block))
+    {
+        dbg_printf(" block #%d %p alloc %d size %zu",
+        count, (void *)block, get_alloc(block), get_size(block));
+        if (!get_alloc(block))
+        {
+            dbg_printf(" prev %p/ next %p\n",(void *)block->data.link.prev, (void *)block->data.link.next);
+
+        } 
+        else {
+            dbg_printf("\n");
+        }
+
+        count++;
+    }
+    
 }
 
 
@@ -387,6 +456,7 @@ void *calloc(size_t elements, size_t size)
  */
 static block_t *extend_heap(size_t size)
 {
+    // dbg_printf("extend_heap\n");
     void *bp;
 
     // Allocate an even number of words to maintain alignment
@@ -408,12 +478,14 @@ static block_t *extend_heap(size_t size)
     write_header(block, size, false);
     write_footer(block, size, false);
 
+    // insert_free_block(block);
+
     // Create new epilogue header
     block_t *block_next = find_next(block);
     write_header(block_next, 0, true);
 
     // Coalesce in case the previous block was free
-    // block = coalesce_block(block);
+    block = coalesce_block(block);
 
     return block;
 }
@@ -444,31 +516,56 @@ static block_t *coalesce_block(block_t *block)
     bool prev_alloc = extract_alloc(*find_prev_footer(block));
     bool next_alloc = get_alloc(block_next);
 
+    bool is_adjacent = false;
+;
+
     if (prev_alloc && next_alloc)              // Case 1
-    {
-        // Nothing to do
+    {   
+        dbg_printf("Case 1\n");
+        is_adjacent = (free_list == block_next);
+        insert_free_block(block,is_adjacent);
     }
 
     else if (prev_alloc && !next_alloc)        // Case 2
     {
+        dbg_printf("Case 2\n");
+        is_adjacent = (free_list == block_next);
         size += get_size(block_next);
         write_header(block, size, false);
         write_footer(block, size, false);
+
+        remove_block_link(block_next);
+        insert_free_block(block,is_adjacent);
+        
     }
 
     else if (!prev_alloc && next_alloc)        // Case 3
     {
+        dbg_printf("Case 3\n");
+        is_adjacent = (free_list == find_next(block_prev));
         size += get_size(block_prev);
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
+
+        remove_block_link(block_prev);
+        insert_free_block(block_prev,is_adjacent);
+
         block = block_prev;
     }
 
     else                                        // Case 4
     {
+        dbg_printf("Case 4\n");
+        is_adjacent = (free_list == find_next(block_prev));
+
         size += get_size(block_next) + get_size(block_prev);
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
+
+        remove_block_link(block_prev);
+        remove_block_link(block_next);
+
+        insert_free_block(block_prev, is_adjacent);
         block = block_prev;
     }
 
@@ -486,25 +583,154 @@ static block_t *coalesce_block(block_t *block)
  */
 static void split_block(block_t *block, size_t asize)
 {
+    // dbg_printf("split block\n");
     dbg_requires(get_alloc(block));
     /* TODO: Can you write a precondition about the value of asize? */
-
-    size_t block_size = get_size(block);
-
-    if ((block_size - asize) >= min_block_size)
+    if (!get_alloc(block))
     {
-        block_t *block_next;
-        write_header(block, asize, true);
-        write_footer(block, asize, true);
-
-        block_next = find_next(block);
-        write_header(block_next, block_size - asize, false);
-        write_footer(block_next, block_size - asize, false);
+        return;
     }
 
+    size_t block_size = get_size(block);
+    if ((block_size - asize) < min_block_size  )
+    {   
+        remove_block_link(block);
+        return;
+    }
+
+
+    write_header(block, asize, true);
+    write_footer(block, asize, true);
+
+    block_t *block_next = find_next(block);
+    write_header(block_next, block_size - asize, false);
+    write_footer(block_next, block_size - asize, false);
+
+    reassign_blocks_link(block_next,block);
+
     dbg_ensures(get_alloc(block));
+    return;
 }
 
+/*
+ * remove_alloc_link: Update links of block's prev/next nodes
+ *                    so block's prev/next links can be removed.
+ *  
+ * @param block whose links to be removed.                  
+ */
+static void remove_block_link(block_t *block)
+{   
+    // dbg_printf("Remove_block link\n");
+    block_t *prev_node = block->data.link.prev;
+    block_t *next_node = block->data.link.next;
+
+    if (prev_node != NULL)
+    { 
+        prev_node->data.link.next = next_node;
+    }
+    if (next_node != NULL) 
+    {
+        next_node->data.link.prev = prev_node;
+    }
+
+    block->data.link.prev = NULL;
+    block->data.link.next = NULL;
+
+    print_free_list();
+    print_heap();
+    return;
+}
+
+/*
+ * reassign_blocks_link: Let free block inherits prev/next links
+ *                       previously held by alloc block. Update prev/next 
+ *                       nodes' links and remove alloc block's prev/next link.                      
+ * @param free is the free block 
+ * @param alloc is the block with payload
+ */
+static void reassign_blocks_link(block_t *free, block_t *alloc)
+{
+    // dbg_printf("reassign block\n");
+    block_t *prev_node = alloc->data.link.prev;
+    block_t *next_node = alloc->data.link.next;
+
+    free->data.link.prev = prev_node;
+    free->data.link.next = next_node;
+
+    if (prev_node != NULL) 
+    {
+    prev_node->data.link.next = free;
+
+    }
+
+    if (next_node != NULL) 
+    {
+    next_node->data.link.prev = free;
+
+    }
+
+    alloc->data.link.prev = NULL;
+    alloc->data.link.next = NULL;
+
+    // alloc was the head of free_list. Update 
+    // free_list to free.
+    if (free_list == alloc)
+    {   
+        // dbg_printf("update free_list\n");
+        free_list = free;
+
+    }
+
+    print_free_list();
+    print_heap();
+    return;
+}
+
+static void insert_free_block(block_t *block, bool is_adjacent)
+{   
+//     dbg_printf("insert_free_block\n");
+//     dbg_printf("alloc %d, alloc %zu\n", get_alloc(block), get_size(block));
+
+    // initialize free_list
+    if (free_list == NULL)
+    {
+        // dbg_printf("Init free_list with block%p\n", (void *)block);
+
+        free_list = block;
+
+        // dbg_printf("free_list start =  block%p\n", (void *)(free_list->data.link.next));
+
+        return;
+    }
+
+    // Only one free block in heap. 
+    if (free_list == block)
+    {
+        // dbg_printf("One free block\n");
+        return;
+    }
+
+
+    // Is actaully one big block
+    if (is_adjacent)
+    {
+        block->data.link.next = NULL;
+    } 
+    else
+    {            
+        block_t *old_head = free_list;
+        block->data.link.next = old_head;
+        old_head->data.link.prev = block;
+    }
+    
+    block->data.link.prev = NULL;
+
+   
+    free_list = block;
+    print_free_list();
+    print_heap();
+    return;
+}
 
 /*
  * <What does this function do?>
@@ -516,8 +742,8 @@ static block_t *find_fit(size_t asize)
 {
     block_t *block;
 
-    for (block = heap_start; get_size(block) > 0;
-                             block = find_next(block))
+    for (block = free_list; block != NULL && get_size(block) > 0;
+                             block = block->data.link.next)
     {
 
         if (!(get_alloc(block)) && (asize <= get_size(block)))
@@ -546,7 +772,9 @@ bool mm_checkheap(int line)
     }
 
     block_t *block;
+    int free_block_count = 0;
     bool prev_free = !get_alloc(heap_start);
+    // int index = 0;
     for (block = heap_start; get_size(block) > 0;
                             block = find_next(block))
     {
@@ -568,13 +796,14 @@ bool mm_checkheap(int line)
                     extract_alloc(*(header_to_footer(block))));
             return false;
         }
+        // index ++;
 
         // Check payload alignment
-        unsigned long payload_addr = (unsigned long) &(block->payload);
+        unsigned long payload_addr = (unsigned long) &(block->data.payload);
         if(( payload_addr & 0xFUL) != 0) 
         {
             dbg_printf("Payload not aligned \n");
-            dbg_printf("Payload addr %p\n", (void *)&(block->payload));
+            dbg_printf("Payload addr %p\n", (void *)&(block->data.payload));
             return false;
         }
 
@@ -593,6 +822,11 @@ bool mm_checkheap(int line)
             return false;
         }
 
+        if (!get_alloc(block)) 
+        {
+            free_block_count += 1;
+        }
+
         prev_free = get_alloc(block);
 
     }
@@ -601,6 +835,42 @@ bool mm_checkheap(int line)
     if (!extract_alloc(block->header) || extract_size(block->header))
     {
         dbg_printf("Epilogue is not properly created\n");
+        return false;
+    }
+
+    // Check free list
+    // if (free_list->data.link.next == NULL)
+    // {
+
+    // }
+    for (block = free_list; 
+                block != NULL ; 
+                block = block->data.link.next)
+    {
+        free_block_count -= 1;
+        block_t *node_next = block->data.link.next;
+        if (node_next == NULL) 
+        {
+            break;
+        }
+
+        if (node_next->data.link.prev != block)
+        {
+            dbg_printf("Prev and next pointers not consistent\n");
+            return false;
+        }
+
+        if((void *)(mem_heap_lo()) > (void *)(block) || (void *)(mem_heap_hi()) < (void *)(block))
+        {
+            dbg_printf("Free block outside of boundary\n");
+            return false;
+        }
+
+    }
+
+    if (free_block_count != 0)
+    {
+        dbg_printf("Free list count and heap's free blocks do not match\n");
         return false;
     }
 
@@ -745,6 +1015,13 @@ static void write_footer(block_t *block, size_t size, bool alloc)
     *footerp = pack(size, alloc);
 }
 
+static void write_link(block_t *block, block_t *prev, block_t *next)
+{
+    dbg_requires(block != NULL);
+    // block->data.link.prev = prev;
+    // block->data.link.next = next;
+}
+
 
 /*
  * find_next: returns the next consecutive block on the heap by adding the
@@ -789,7 +1066,7 @@ static block_t *find_prev(block_t *block)
  */
 static block_t *payload_to_header(void *bp)
 {
-    return (block_t *) ((char *) bp - offsetof(block_t, payload));
+    return (block_t *) ((char *) bp - offsetof(block_t, data.payload));
 }
 
 
@@ -798,8 +1075,9 @@ static block_t *payload_to_header(void *bp)
  *                    corresponding payload.
  */
 static void *header_to_payload(block_t *block)
-{
-    return (void *) (block->payload);
+{   
+    // dbg_printf("getting payload");
+    return (void *) (block->data.payload);
 }
 
 
@@ -809,5 +1087,5 @@ static void *header_to_payload(block_t *block)
  */
 static word_t *header_to_footer(block_t *block)
 {
-    return (word_t *) (block->payload + get_size(block) - dsize);
+    return (word_t *) (block->data.payload + get_size(block) - dsize);
 }
