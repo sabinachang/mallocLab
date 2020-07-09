@@ -69,7 +69,11 @@
 #define dbg_printheap(...)  ((void) sizeof(__VA_ARGS__))
 #endif
 
+// Total number of free lists
+#define FREE_LIST_SIZE 13
 
+// Min size class is 16, 2^4
+#define MIN_SIZE_CLASS 4
 /* Basic constants */
 
 typedef uint64_t word_t;
@@ -143,7 +147,7 @@ typedef struct block
 
 // Pointer to first block
 static block_t *heap_start = NULL;
-static block_t *free_list = NULL;
+static block_t *free_list[FREE_LIST_SIZE];
 
 /* Function prototypes for internal helper routines */
 
@@ -156,7 +160,7 @@ static void split_block(block_t *block, size_t asize);
 
 static void remove_block_link(block_t *block);
 static void reassign_blocks_link(block_t *free, block_t *alloc);
-static void insert_free_block(block_t *block, bool is_adjacent);
+static void insert_free_block(block_t *block);
 
 
 static size_t max(size_t x, size_t y);
@@ -184,6 +188,8 @@ static block_t *find_prev(block_t *block);
 
 static void print_free_list();
 static void print_heap();
+bool exists_in_heap(block_t* find);
+
 
 
 
@@ -214,9 +220,12 @@ bool mm_init(void)
 
     // Heap starts with first "block header", currently the epilogue
     heap_start = (block_t *) &(start[1]);
-    free_list = NULL;
-    // free_list = (block_t *) &(start[0]);
-    // free_list->data.link.next = NULL;
+    // Initialize free list
+    int i;
+    for (i = 0; i < FREE_LIST_SIZE; i++)
+    {
+        free_list[i] = NULL;
+    }
 
     // Extend the empty heap with a free block of chunksize bytes
     if (extend_heap(chunksize) == NULL)
@@ -322,12 +331,9 @@ void free(void *bp)
     write_header(block, size, false);
     write_footer(block, size, false);
 
-    // reset free link here?
     // Try to coalesce the block with its neighbors
+    // insert_free_block(block);
     block = coalesce_block(block);
-    print_free_list();
-    print_heap();
-
     dbg_ensures(mm_checkheap(__LINE__));
 }
 
@@ -335,11 +341,21 @@ static void print_free_list()
 {
     block_t *block;
     int count = 1;
-    for (block = free_list; block != NULL; block = block->data.link.next)
+    int i;
+    for (i = 0; i < FREE_LIST_SIZE; i++)
     {
-        dbg_printf("free block #%d %p prev %p/ next %p size %zu\n",
-        count, (void *)block, (void *)block->data.link.prev, (void *)block->data.link.next, get_size(block));
-        count ++;
+        block = free_list[i];
+        count = 1;
+        dbg_printf("Class size 2 ^ %d\n", i + 4);
+        while (block != NULL)
+        {
+            
+            dbg_printf("free block #%d %p prev %p/ next %p size %zu\n",
+            count, (void *)block, (void *)block->data.link.prev, (void *)block->data.link.next, get_size(block));
+            count ++;
+            block = block->data.link.next;
+        }
+        
     }
 }
 
@@ -392,8 +408,16 @@ void *realloc(void *ptr, size_t size)
         return malloc(size);
     }
 
+    if (!exists_in_heap(block))
+    {
+        return NULL;
+    }
+    
+
     // Otherwise, proceed with reallocation
     newptr = malloc(size);
+
+    
 
     // If malloc fails, the original block is left untouched
     if (newptr == NULL)
@@ -415,7 +439,23 @@ void *realloc(void *ptr, size_t size)
     return newptr;
 }
 
-
+bool exists_in_heap(block_t* find)
+{
+    dbg_printf("exists_in_heap\n");
+    block_t* block;
+    for (block = heap_start; get_size(block) > 0;
+                            block = find_next(block))
+    {
+        if (find == block && get_alloc(block))
+        {
+            dbg_printf("true\n");
+            return true;
+        }
+        
+    }
+    dbg_printf("false\n");
+    return false;
+}
 /*
  * <What does this function do?>
  * <What are the function's arguments?>
@@ -478,8 +518,6 @@ static block_t *extend_heap(size_t size)
     write_header(block, size, false);
     write_footer(block, size, false);
 
-    // insert_free_block(block);
-
     // Create new epilogue header
     block_t *block_next = find_next(block);
     write_header(block_next, 0, true);
@@ -503,69 +541,54 @@ static block_t *coalesce_block(block_t *block)
 
     size_t size = get_size(block);
 
-    /*
-     * TODO: delete or replace this comment once you've thought about it.
-     * Think about how we find the prev and next blocks. What information
-     * do we need to have about the heap in order to do this? Why doesn't
-     * "bool prev_alloc = get_alloc(block_prev)" work properly?
-     */
-
     block_t *block_next = find_next(block);
     block_t *block_prev = find_prev(block);
 
     bool prev_alloc = extract_alloc(*find_prev_footer(block));
     bool next_alloc = get_alloc(block_next);
 
-    bool is_adjacent = false;
-;
 
     if (prev_alloc && next_alloc)              // Case 1
     {   
         dbg_printf("Case 1\n");
-        is_adjacent = (free_list == block_next);
-        insert_free_block(block,is_adjacent);
+        insert_free_block(block);
     }
 
     else if (prev_alloc && !next_alloc)        // Case 2
     {
         dbg_printf("Case 2\n");
-        is_adjacent = (free_list == block_next);
         size += get_size(block_next);
+        remove_block_link(block_next);
         write_header(block, size, false);
         write_footer(block, size, false);
-
-        remove_block_link(block_next);
-        insert_free_block(block,is_adjacent);
+        insert_free_block(block);
         
     }
 
     else if (!prev_alloc && next_alloc)        // Case 3
     {
         dbg_printf("Case 3\n");
-        is_adjacent = (free_list == find_next(block_prev));
         size += get_size(block_prev);
+        remove_block_link(block_prev);
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
-
-        remove_block_link(block_prev);
-        insert_free_block(block_prev,is_adjacent);
-
+        insert_free_block(block_prev);
         block = block_prev;
     }
 
     else                                        // Case 4
     {
         dbg_printf("Case 4\n");
-        is_adjacent = (free_list == find_next(block_prev));
-
         size += get_size(block_next) + get_size(block_prev);
-        write_header(block_prev, size, false);
-        write_footer(block_prev, size, false);
 
         remove_block_link(block_prev);
         remove_block_link(block_next);
 
-        insert_free_block(block_prev, is_adjacent);
+        write_header(block_prev, size, false);
+        write_footer(block_prev, size, false);
+
+
+        insert_free_block(block_prev);
         block = block_prev;
     }
 
@@ -576,28 +599,35 @@ static block_t *coalesce_block(block_t *block)
 
 
 /*
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
+ * split_block: Split unused free space of a block 
+ *              into a new free block to decrease 
+ *              internal fragmentation. No need to
+ *              split if unused free space is less 
+ *              than min_block_size. 
+ *                
+ * block: newly allocated block, might be larger
+ *        than needed
+ * asize: minimum required size for the block
  */
 static void split_block(block_t *block, size_t asize)
 {
-    // dbg_printf("split block\n");
     dbg_requires(get_alloc(block));
-    /* TODO: Can you write a precondition about the value of asize? */
+
     if (!get_alloc(block))
     {
         return;
     }
 
+    remove_block_link(block);
+
     size_t block_size = get_size(block);
-    if ((block_size - asize) < min_block_size  )
+    if ((block_size - asize) < min_block_size )
     {   
-        remove_block_link(block);
+        // No need to split, just update header/footer
+        write_header(block, block_size, true);
+        write_footer(block, block_size, true);
         return;
     }
-
 
     write_header(block, asize, true);
     write_footer(block, asize, true);
@@ -606,160 +636,173 @@ static void split_block(block_t *block, size_t asize)
     write_header(block_next, block_size - asize, false);
     write_footer(block_next, block_size - asize, false);
 
-    reassign_blocks_link(block_next,block);
-
+    coalesce_block(block_next);
     dbg_ensures(get_alloc(block));
     return;
 }
 
 /*
- * remove_alloc_link: Update links of block's prev/next nodes
- *                    so block's prev/next links can be removed.
+ * remove_block_link: Remove a block from the free list it
+ *                    originally resides in
  *  
- * @param block whose links to be removed.                  
+ * block: target block to be removed                  
  */
 static void remove_block_link(block_t *block)
 {   
-    // dbg_printf("Remove_block link\n");
+
     block_t *prev_node = block->data.link.prev;
     block_t *next_node = block->data.link.next;
 
-    if (prev_node != NULL)
-    { 
-        prev_node->data.link.next = next_node;
-    }
-    if (next_node != NULL) 
+    size_t block_size = get_size(block);
+    int i;
+
+    // Find the correct size class
+    for (i = 0; i < FREE_LIST_SIZE; i ++)
     {
+        // Already reach the last size class 
+        // Block must belong here
+        if (i == FREE_LIST_SIZE - 1)
+        {
+          break;      
+        } 
+
+        // Check if a block falls into the current size class  
+        if ((block_size >= (1L << (i + MIN_SIZE_CLASS))) 
+                && (block_size < (1L << (i + (MIN_SIZE_CLASS + 1)))))
+        {
+            break;
+        }
+        
+    }
+
+    // Removing from one single list
+    if (prev_node == NULL && next_node == NULL)
+    {
+        free_list[i] = NULL;
+    } 
+    // Removing from start
+    else if (prev_node == NULL && next_node != NULL)
+    {
+        next_node->data.link.prev = NULL;
+        free_list[i] = next_node;
+    }
+    // Removing from middle
+    else if (prev_node != NULL && next_node != NULL)
+    {
+        prev_node->data.link.next = next_node;
         next_node->data.link.prev = prev_node;
     }
-
-    block->data.link.prev = NULL;
-    block->data.link.next = NULL;
-
-    print_free_list();
-    print_heap();
+    // Removing from end
+    else 
+    {
+        prev_node->data.link.next = NULL;
+    }
     return;
 }
 
 /*
- * reassign_blocks_link: Let free block inherits prev/next links
- *                       previously held by alloc block. Update prev/next 
- *                       nodes' links and remove alloc block's prev/next link.                      
- * @param free is the free block 
- * @param alloc is the block with payload
+ * insert_free_block: Insert a block into the start of 
+ *                    the correct free list
+ *  
+ * block: target block to be inserted                  
  */
-static void reassign_blocks_link(block_t *free, block_t *alloc)
-{
-    // dbg_printf("reassign block\n");
-    block_t *prev_node = alloc->data.link.prev;
-    block_t *next_node = alloc->data.link.next;
-
-    free->data.link.prev = prev_node;
-    free->data.link.next = next_node;
-
-    if (prev_node != NULL) 
-    {
-    prev_node->data.link.next = free;
-
-    }
-
-    if (next_node != NULL) 
-    {
-    next_node->data.link.prev = free;
-
-    }
-
-    alloc->data.link.prev = NULL;
-    alloc->data.link.next = NULL;
-
-    // alloc was the head of free_list. Update 
-    // free_list to free.
-    if (free_list == alloc)
-    {   
-        // dbg_printf("update free_list\n");
-        free_list = free;
-
-    }
-
-    print_free_list();
-    print_heap();
-    return;
-}
-
-static void insert_free_block(block_t *block, bool is_adjacent)
+static void insert_free_block(block_t *block)
 {   
-//     dbg_printf("insert_free_block\n");
-//     dbg_printf("alloc %d, alloc %zu\n", get_alloc(block), get_size(block));
 
-    // initialize free_list
-    if (free_list == NULL)
+    size_t block_size = get_size(block);
+    int i;
+
+    // Find the correct size class
+    for (i = 0; i < FREE_LIST_SIZE; i ++)
     {
-        // dbg_printf("Init free_list with block%p\n", (void *)block);
+        // Already reach the last size class
+        // Block must belong here
+        if (i == FREE_LIST_SIZE - 1)
+        {
+          break;      
+        } 
 
-        free_list = block;
-
-        // dbg_printf("free_list start =  block%p\n", (void *)(free_list->data.link.next));
-
-        return;
+        // Check if a block falls into the current size class  
+        if ((block_size >= (1L << (i + MIN_SIZE_CLASS))) 
+                && (block_size < (1L << (i + (MIN_SIZE_CLASS + 1)))))
+        {
+            break;
+        }
+        
     }
 
-    // Only one free block in heap. 
-    if (free_list == block)
+    // If list is empty, insert into empty list
+    if (free_list[i] == NULL)
     {
-        // dbg_printf("One free block\n");
-        return;
-    }
-
-
-    // Is actaully one big block
-    if (is_adjacent)
-    {
+        block->data.link.prev = NULL;
         block->data.link.next = NULL;
+        free_list[i] = block;
+        return;
     } 
-    else
-    {            
-        block_t *old_head = free_list;
-        block->data.link.next = old_head;
-        old_head->data.link.prev = block;
-    }
     
-    block->data.link.prev = NULL;
-
-   
-    free_list = block;
-    print_free_list();
-    print_heap();
+        // Insert into start
+        block->data.link.prev = NULL;
+        block->data.link.next = free_list[i];
+        free_list[i]->data.link.prev = block;
+        free_list[i] = block;
+    
     return;
 }
 
 /*
  * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
+ * find_fit: Look for free block starting from free list
+ *           of closest size class. Iterate through all 
+ *           free lists to check. Return an appropriate
+ *           block or null
+ * 
+ * asize: The size that we need
  */
 static block_t *find_fit(size_t asize)
 {
+    int i;
+
+    // Find the starting size class
+    for (i = 0; i < FREE_LIST_SIZE; i ++)
+    {
+        if (i == FREE_LIST_SIZE -1)
+        {
+          break;      
+        } 
+        if ((asize >= (1L << (i + MIN_SIZE_CLASS))) 
+                && (asize < (1L << (i + (MIN_SIZE_CLASS + 1)))))
+        {
+            break;
+        }
+        
+    }
     block_t *block;
 
-    for (block = free_list; block != NULL && get_size(block) > 0;
-                             block = block->data.link.next)
+    // Look for 
+    for (; i < FREE_LIST_SIZE; i ++)
     {
-
-        if (!(get_alloc(block)) && (asize <= get_size(block)))
+        block = free_list[i];
+        while (block != NULL)
         {
-            return block;
+            size_t block_size = get_size(block);
+            if (block_size >= asize)
+            {
+                return block;
+            }
+
+            block = block->data.link.next;
         }
+    
     }
+
     return NULL; // no fit found
 }
 
 
 /*
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
+ * mm_checkheap: Check heap integrity after major operations
+ *               Ensure block,list and heap level are correct.
+ *               Return false if find an error, true if none
  */
 bool mm_checkheap(int line)
 {   
@@ -796,7 +839,6 @@ bool mm_checkheap(int line)
                     extract_alloc(*(header_to_footer(block))));
             return false;
         }
-        // index ++;
 
         // Check payload alignment
         unsigned long payload_addr = (unsigned long) &(block->data.payload);
@@ -838,45 +880,66 @@ bool mm_checkheap(int line)
         return false;
     }
 
-    // Check free list
-    // if (free_list->data.link.next == NULL)
-    // {
-
-    // }
-    for (block = free_list; 
-                block != NULL ; 
-                block = block->data.link.next)
+    int i;
+    for (i = 0; i < FREE_LIST_SIZE; i ++)
     {
-        free_block_count -= 1;
-        block_t *node_next = block->data.link.next;
-        if (node_next == NULL) 
+        block_t *block = free_list[i];
+        while (block != NULL)
         {
-            break;
-        }
+            free_block_count -= 1;
+            // Check memory bound
+            if((void *)(mem_heap_lo()) > (void *)(block) || (void *)(mem_heap_hi()) < (void *)(block))
+            {
+                dbg_printf("Free block outside of boundary\n");
+                return false;
+            }
 
-        if (node_next->data.link.prev != block)
-        {
-            dbg_printf("Prev and next pointers not consistent\n");
-            return false;
-        }
+            // Check size class
+            size_t bsize = get_size(block);
+            if (i == (FREE_LIST_SIZE -1)) 
+            {
+                if (bsize < (1L << (i + 4)))
+                {
+                    dbg_printf("Free block in wrong size class\n");
+                    dbg_printf("Block size = %zu in largest size class %lu\n", bsize, (1L << (i +4)) );
+                    return false;
+                }
+                
+            } else if ((bsize < (1L << (i + 4))) || (bsize >= (1L << (i + 5))))
+            {
+                dbg_printf("Free block in wrong size class\n");
+                dbg_printf("Block size = %zu in size class %lu\n", bsize, (1L << (i +4)) );
+                return false;
+            }
 
-        if((void *)(mem_heap_lo()) > (void *)(block) || (void *)(mem_heap_hi()) < (void *)(block))
-        {
-            dbg_printf("Free block outside of boundary\n");
-            return false;
-        }
+            // Check pointer consistency
+            block_t *node_next = block->data.link.next;
+            if (node_next == NULL) 
+            {   
+                break;
+            }
 
+            if (node_next->data.link.prev != block)
+            {
+                dbg_printf("Prev and next pointers not consistent\n");
+                return false;
+            }   
+
+           block = node_next;
+
+        }
     }
-
+    
+    // Check free_list size and total free blocks in heap
     if (free_block_count != 0)
     {
         dbg_printf("Free list count and heap's free blocks do not match\n");
+        print_heap();
+        print_free_list();
         return false;
     }
 
-
     return true;
-
 }
 
 
