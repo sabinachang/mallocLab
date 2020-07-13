@@ -128,8 +128,9 @@ typedef struct block
 
     struct link_t
     {
-        struct block* prev;
         struct block* next;
+        struct block* prev;
+
     } link;
     
    
@@ -411,6 +412,12 @@ static void print_heap()
             dbg_printf("\n");
         }
 
+        dbg_printf("payload: %p ", header_to_payload(block));
+        if (get_size(block) > dsize)
+        {
+            dbg_printf("footer: %p", (void*) header_to_footer(block));
+        }
+        dbg_printf("\n");
         count++;
     }
     
@@ -425,7 +432,6 @@ static void print_heap()
  */
 void *realloc(void *ptr, size_t size)
 {
-    block_t *block = payload_to_header(ptr);
     size_t copysize;
     void *newptr;
 
@@ -442,16 +448,14 @@ void *realloc(void *ptr, size_t size)
         return malloc(size);
     }
 
+    block_t *block = payload_to_header(ptr);
     if (!exists_in_heap(block))
     {
         return NULL;
     }
     
-
     // Otherwise, proceed with reallocation
     newptr = malloc(size);
-
-    
 
     // If malloc fails, the original block is left untouched
     if (newptr == NULL)
@@ -465,6 +469,7 @@ void *realloc(void *ptr, size_t size)
     {
         copysize = size;
     }
+
     memcpy(newptr, ptr, copysize);
 
     // Free the old block
@@ -672,22 +677,26 @@ static void split_block(block_t *block, size_t asize)
     remove_block_link(block);
 
     size_t block_size = get_size(block);
+
+    // Dont split blocks with not enough space
     if ((block_size - asize) < dsize )
     {   
-        // No need to split, just update header/footer
         write_header(block, block_size, true, get_prev_alloc(block), get_prev_small(block));
-        // write_footer(block, block_size, true);
+       
         write_next_header(block);
         return;
     }
 
     write_header(block, asize, true, get_prev_alloc(block), get_prev_small(block));
-    // write_footer(block, asize, true);
 
     block_t *block_next = find_next(block);
     bool prev_small = get_size(block) <= dsize;
     write_header(block_next, block_size - asize, false, true, prev_small);
-    write_footer(block_next, block_size - asize, false, true, prev_small);
+
+    if (get_size(block_next) > dsize)
+    {
+        write_footer(block_next, block_size - asize, false, true, prev_small);
+    }
 
     coalesce_block(block_next);
     dbg_ensures(get_alloc(block));
@@ -829,17 +838,7 @@ static void insert_free_block(block_t *block)
     
     block_t *block_target = free_list[i];
     block_t *prev = NULL;
-    // for (; block_target != NULL;
-    //         block_target = block_target->data.link.next)
-    // {
-    //     size_t target = get_size(block_target);
-    //     if (block_size <= target)
-    //     {
-    //         break;
-    //     }
-    //     prev = block_target;
-    // }      
-    
+   
     if (prev == NULL && block_target != NULL)
     { 
         // Insert into start
@@ -848,31 +847,7 @@ static void insert_free_block(block_t *block)
         block_target->data.link.prev = block;
         free_list[i] = block;
     }   
-    // // Insert into middle
-    // else if (prev != NULL && block_target != NULL)
-    // {   
-    //      if (find_next(block) == block_target) 
-    //     {
-    //         dbg_printf("adjacent block %p target %p", (void *)block, (void *) block_target);
-    //     }
-    //     prev->data.link.next = block;
-    //     block_target->data.link.prev = block;
-    //     block->data.link.prev = prev;
-    //     block->data.link.next = block_target;
-    // }
-    // else if (prev != NULL && block_target == NULL)
-    // {   
-    //      if (find_next(block) == block_target) 
-    //     {
-    //         dbg_printf("adjacent block %p target %p", (void *)block, (void *) block_target);
-    //     }
-    //     prev->data.link.next = block;
-    //     block->data.link.prev = prev;
-    //     block->data.link.next = NULL;
-    // }
-    
-        
-    
+
     return;
 }
 
@@ -895,9 +870,7 @@ static block_t *find_fit(size_t asize)
     {
         if (small_blocks_list != NULL)
         {
-            block_t *block = small_blocks_list;
-            small_blocks_list = small_blocks_list->data.link.next;
-            return block;
+            return small_blocks_list;
         }
     }
 
@@ -947,7 +920,11 @@ bool mm_checkheap(int line)
 {   
     // Check prologue is allocated with size 0
     word_t *prologue = find_prev_footer(heap_start);
-    if (!extract_alloc(*prologue) || extract_size(*prologue)) 
+    bool is_free = (extract_alloc(*prologue) == false);
+    bool has_size = (extract_size(*prologue) == true);
+    bool is_small = (extract_prev_small(*prologue) == true);
+    bool is_prev_alloc = (extract_prev_alloc(*prologue) == true);
+    if (is_free || has_size || is_small || is_prev_alloc) 
     {
         dbg_printf("Prologue is not properly created\n");
         return false;
@@ -962,7 +939,16 @@ bool mm_checkheap(int line)
     for (block = heap_start; get_size(block) > 0;
                             block = find_next(block))
     {
-        
+        // Check header stores correct size
+        size_t payload_size = get_payload_size(block);
+        if ((payload_size + wsize) != get_size(block))
+        {
+            dbg_printf("Size is inconsistent\n");
+            dbg_printf("get_size %zu != (payload %zu + header %zu)", 
+                    get_size(block), payload_size, wsize);
+            return false;
+        }
+
         // Check prev small status matches previous block
         if (prev_small != get_prev_small(block))
         {
@@ -1050,6 +1036,14 @@ bool mm_checkheap(int line)
             return false;
         }
 
+        size_t payload_size = get_payload_size(block);
+        if ((payload_size + wsize) != get_size(block))
+        {
+            dbg_printf("Size for small block is inconsistent\n");
+            dbg_printf("get_size %zu != (payload %zu + header %zu)", 
+                    get_size(block), payload_size, wsize);
+            return false;
+        }
     }
 
     int i;
@@ -1252,7 +1246,15 @@ static size_t get_size(block_t *block)
 static word_t get_payload_size(block_t *block)
 {
     size_t asize = get_size(block);
-    return asize - dsize;
+
+    // Alloc block no footer
+    if (get_alloc(block))
+    {
+        return asize - wsize;
+    }
+    
+    // free block check if small
+    return asize <= dsize ? asize - wsize : asize - dsize;
 }
 
 
